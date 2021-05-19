@@ -1,0 +1,322 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: This is a stack to provision an RStudio Server instance on Amazon Linux 2 for direct access.
+
+Parameters:
+  NetworkStack:
+    Type: String
+    Description: Name of the network stack that was used to create the VPC.  (Used to get exports)
+  ProjectTag:
+    Type: String
+    Description: Each created resource that supports tagging will have this as a Project and this will be used as a prefix for all created resources.
+  Subnet:
+    Type: AWS::EC2::Subnet::Id
+    Description: The Subnet that the instances will live, should be PUBLIC since this is direct access.
+  KeyPair:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: KeyPair used to access this instance
+  ComputeSize:
+    Type: String
+    Description: Small= t3.micro (2 vcpu, 1GB Memory) | Medium= m5.2xlarge (16 vcpu, 64GB Memory) | Large= m5.12xlarge (48 vcpu, 192GB Memory)
+    AllowedValues: [Small, Medium, Large]
+  VolumeSize:
+    Type: Number
+    Description: The size in GB of the gp3 root volume for this instance. (1000GB = 1TB)
+    MinValue: 20
+    MaxValue: 16000
+    Default: 3000
+    ConstraintDescription: The maximum size for a gp3 volume is 16TB (16000GB) and should be no smaller than 20GB for OS installation
+  PrimaryOwner:
+    Type: String
+    Description:  Who is the primary user of this instance? (Sets a Tag and Linux credentials)
+  PrimaryOwnerPassword:
+    Type: String
+    Description:  Primary user password (set for Linux to be used in RStudio Server)
+    NoEcho: true
+  RVersion:
+    Type: String
+    Description: What version of R should be installed
+    AllowedValues: [R4, R3.4]
+    ConstraintDescription: The value must be in (R4, R3.4) case sensitive.  Installed by Amazon Linux Extras
+  RStudioPort:
+    Type: String
+    Description: Port for RStudio Server (default installation is 8787)
+    AllowedValues: ["80","8787","8080"]
+    Default: "80"
+  ShutDownWhenIdle:
+    Type: String
+    Description: This will create a tag that will be used to trigger a shut down when the instance is idle.
+    AllowedValues: ["Yes","No"]
+    Default: "Yes"
+
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "General Information"
+        Parameters:
+          - NetworkStack
+      - Label:
+          default: "Server Configuration"
+        Parameters:
+          - ComputeSize
+          - VolumeSize
+          - ShutDownWhenIdle
+          - KeyPair 
+          - Subnet 
+      - Label:
+          default: "Application Configuration"
+        Parameters:
+          - RVersion
+          - PrimaryOwner
+          - PrimaryOwnerPassword
+          - RStudioPort
+          - ProjectTag
+    ParameterLabels:
+      ProjectTag:
+        default: "Project Tag"
+      Subnet:
+        default: "Subnet of the instance"
+      KeyPair:
+        default: "Key Pair to access the instance"
+      ComputeSize:
+        default: "Instance size"
+      VolumeSize:
+        default: "Disk Size"
+      PrimaryOwner:
+        default: "Primary Owner"
+      PrimaryOwnerPassword:
+        default: "Primary Owner Initial Password"
+      RVersion:
+        default: "Version of R"
+      ShutDownWhenIdle:
+        default: "Shut down when idle?"
+      RStudioPort:
+         default: "RStudio Server Port"
+      NetworkStack:
+        default: "Network Stack"
+
+Outputs:
+  RStudioFullURL:
+    Value: !Sub "http://${ResearchInstance.PublicDnsName}:${RStudioPort}"
+  PublicIp: 
+    Value: !GetAtt ResearchInstance.PublicIp  
+  VersionOfR:
+    Value: !Ref RVersion
+  ComputeSize:
+    Value: !Ref ComputeSize
+  ProjectTag:
+    Value: !Ref ProjectTag
+  InstanceAccess:
+    Value: "Direct"
+  ShutdownInstanceWhenIdle: 
+    Value : !Ref ShutDownWhenIdle
+
+Conditions:
+  CreateSmallInstance: !Equals [!Ref ComputeSize, "Small"]
+  CreateMediumInstance: !Equals [!Ref ComputeSize, "Medium"]
+  #CreateLargeInstance: !Equals [!Ref ComputeSize, "Large"] #Not actually used in any comparison, but created just in case.
+  ShutdownInstanceWhenIdle: !Equals [!Ref ShutDownWhenIdle, "Yes" ]
+
+Resources:
+  ResearchInstance:
+    Type: AWS::EC2::Instance
+    DependsOn: ResearchInstanceEIP
+    Properties:
+      KeyName: !Ref KeyPair
+      ImageId: !FindInMap [AmazonLinux2AMIMap, !Ref "AWS::Region", HVM64]
+      InstanceType: !If [CreateSmallInstance, t3.micro, !If [CreateMediumInstance, m5.4xlarge, m5.12xlarge]]
+      IamInstanceProfile: !ImportValue 
+                            "Fn::Sub" : "${NetworkStack}-researcher-instance-profile"
+      Monitoring: false
+      UserData: 
+        Fn::Base64: !Sub |
+          #!/bin/bash 
+          #Send outputs to a log and the console
+          exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+          
+          #Set Tags on the Instance Root Volumes
+          echo -e "\n*************\n*************\n*************\n Setting Volume Tags \n*************\n"
+          AWS_AVAIL_ZONE=$(curl http://169.254.169.254/latest/meta-data/placement/availability-zone)
+          AWS_REGION="`echo \"$AWS_AVAIL_ZONE\" | sed 's/[a-z]$//'`"
+          AWS_INSTANCE_ID=$(curl http://169.254.169.254/latest/meta-data/instance-id)
+          ROOT_VOLUME_IDS=$(aws ec2 describe-instances --region $AWS_REGION --instance-id $AWS_INSTANCE_ID --output text --query Reservations[0].Instances[0].BlockDeviceMappings[0].Ebs.VolumeId)
+          aws ec2 create-tags --resources $ROOT_VOLUME_IDS --region $AWS_REGION --tags Key=Project,Value=${ProjectTag} Key=Owner,Value=${PrimaryOwner}
+
+          #Start with updates 
+          echo -e "\n*************\n*************\n*************\n Pulling Updates \n*************\n"
+          cd /tmp
+          yum update -y
+
+          #Cloudwatch Agent
+          echo -e "\n*************\n*************\n*************\n Installing CloudWatch Agent \n*************\n"
+          yum install -y amazon-cloudwatch-agent
+
+          #Install mariadb-devel
+          echo -e "\n*************\n*************\n*************\n Installing mariadb-devel \n*************\n"
+          yum install -y mariadb-devel
+          
+          #Install curl-devel
+          echo -e "\n*************\n*************\n*************\n Installing curl-devel \n*************\n"
+          yum install -y curl-devel
+
+          #Install openssl-devel
+          echo -e "\n*************\n*************\n*************\n Installing libxml2-devel \n*************\n"
+          yum install -y libxml2-devel
+
+          #Install openssl-devel
+          echo -e "\n*************\n*************\n*************\n Installing openssl-devel \n*************\n"
+          yum install -y openssl-devel
+
+          #Install openssl-devel
+          echo -e "\n*************\n*************\n*************\n Installing git \n*************\n"
+          yum install -y git
+
+          #install R
+          echo -e "\n*************\n*************\n*************\n Installing R \n*************\n"
+          amazon-linux-extras install -y ${RVersion}
+
+          #install R Packages
+          echo -e "\n*************\n*************\n************* Installing R Packages - argparse \n*************\n"
+          R -e "install.packages('argparse', repos='http://cran.rstudio.com/')"
+
+          echo -e "\n*************\n*************\n************* Installing R Packages - DBI \n*************\n"
+          R -e "install.packages('DBI', repos='http://cran.rstudio.com/')"
+
+          echo -e "\n*************\n*************\n************* Installing R Packages - optparse \n*************\n"
+          R -e "install.packages('optparse', repos='http://cran.rstudio.com/')"
+
+          echo -e "\n*************\n*************\n************* Installing R Packages - RMySQL \n*************\n"
+          R -e "install.packages('RMySQL', repos='http://cran.rstudio.com/')"
+
+          echo -e "\n*************\n*************\n************* Installing R Packages - RSQLite \n*************\n"
+          R -e "install.packages('RSQLite', repos='http://cran.rstudio.com/')"
+
+          echo -e "\n*************\n*************\n************* Installing R Packages - xml2 \n*************\n"
+          R -e "install.packages('xml2', repos='http://cran.rstudio.com/')"
+          
+          echo -e "\n*************\n*************\n************* Installing R Packages - openssl \n*************\n"
+          R -e "install.packages('openssl', repos='http://cran.rstudio.com/')"
+
+          echo -e "\n*************\n*************\n************* Installing R Packages - httr \n*************\n"
+          R -e "install.packages('httr', repos='http://cran.rstudio.com/')"
+                    
+          echo -e "\n*************\n*************\n************* Installing R Packages - rmarkdown \n*************\n"
+          R -e "install.packages('rmarkdown', repos='http://cran.rstudio.com/')"
+          
+          echo -e "\n*************\n*************\n************* Installing R Packages - RCurl \n*************\n"
+          R -e "install.packages('RCurl', repos='http://cran.rstudio.com/')"
+          
+          # echo -e "\n*************\n*************\n*************\n Installing R Packages - shiny \n*************\n"
+          # R -e "install.packages('shiny', repos='http://cran.rstudio.com/')"
+          
+          echo -e "\n*************\n*************\n************* Installing R Packages - AWS.S3 \n*************\n"
+          R -e "install.packages('aws.s3', repos='http://cran.rstudio.com/')"
+
+          #install RStudio-Server Version:  1.4.1106| Released:  2021-03-02
+          echo -e "\n*************\n*************\n*************\n Installing RStudio Server \n*************\n"
+          wget https://download2.rstudio.org/server/centos7/x86_64/rstudio-server-rhel-1.4.1106-x86_64.rpm
+          yum install -y --nogpgcheck rstudio-server-rhel-1.4.1106-x86_64.rpm
+          rm rstudio-server-rhel-1.4.1106-x86_64.rpm
+
+          #add Primary user(s)
+          echo -e "\n*************\n*************\n*************\n Add Primary Owner user \n*************\n"
+          useradd ${PrimaryOwner}
+          echo ${PrimaryOwner}:${PrimaryOwnerPassword} | chpasswd
+
+          #set RStudio Server port
+          echo -e "\n*************\n*************\n*************\n RStudio Server port \n*************\n"
+          sh -c "echo 'www-port=80' > /etc/rstudio/rserver.conf"
+          rstudio-server restart
+
+          #Install SSM Agent
+          echo -e "\n*************\n*************\n*************\n Installing SSM Agent \n*************\n"
+          yum install -ty https://s3.${AWS::Region}.amazonaws.com/amazon-ssm-${AWS::Region}/latest/linux_amd64/amazon-ssm-agent.rpm
+          systemctl -q enable amazon-ssm-agent
+          systemctl -q start amazon-ssm-agent
+
+          echo -e "\n*************\n*************\n*************\n Bootstrapping complete \n*************\n"
+      BlockDeviceMappings:
+      - DeviceName: /dev/xvda
+        Ebs:
+          VolumeType: gp3
+          VolumeSize: !Ref VolumeSize
+          Iops: 16000
+          DeleteOnTermination: True
+          Encrypted: True
+      NetworkInterfaces:
+        - DeviceIndex: "0"
+          NetworkInterfaceId: !Ref ResearchInstanceNetworkInterface
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+        - Key: Owner
+          Value: !Ref PrimaryOwner
+        - Key: Name
+          Value: !Sub "${PrimaryOwner}-${ProjectTag}-${AWS::StackName}"
+        - Key: ShutDownWhenIdle
+          Value: !Ref ShutDownWhenIdle
+  
+  ResearchInstanceNetworkInterface:
+    Type: AWS::EC2::NetworkInterface
+    Properties:
+      SubnetId: !Ref Subnet
+      Description: !Sub "Network interface for research instance created from stack ${AWS::StackName}"
+      GroupSet:
+      - !ImportValue 
+          "Fn::Sub" : "${NetworkStack}-direct-instance-sg"
+      SourceDestCheck: true
+      Tags:
+        - Key:  Name
+          Value: !Sub "${PrimaryOwner}-${ProjectTag}-${AWS::StackName}-network" 
+        - Key: Project
+          Value: !Ref ProjectTag
+        - Key: Owner
+          Value: !Ref PrimaryOwner
+
+  ResearchInstanceEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: !ImportValue 
+                "Fn::Sub" : "${NetworkStack}-vpc"
+      Tags:
+        - Key:  Name
+          Value: !Sub "${PrimaryOwner}-${ProjectTag}-${AWS::StackName}-eip" 
+        - Key: Project
+          Value: !Ref ProjectTag
+        - Key: Owner
+          Value: !Ref PrimaryOwner
+  
+  ResearchInstanceEIPAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt ResearchInstanceEIP.AllocationId
+      NetworkInterfaceId: !Ref ResearchInstanceNetworkInterface
+
+  ResearchInstanceCloudwatchAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: ShutdownInstanceWhenIdle
+    Properties:
+      ActionsEnabled: true
+      AlarmActions:
+        - !Sub "arn:aws:automate:${AWS::Region}:ec2:stop"
+      AlarmName: !Join ["-",["cwa-shutdown-idle-instance", !Sub "${AWS::StackName}"]]
+      AlarmDescription: !Sub "Alarm to detect idle instances created by stack ${AWS::StackName}"
+      ComparisonOperator: LessThanThreshold
+      DatapointsToAlarm: 3
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref ResearchInstance
+      EvaluationPeriods: 3
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Period: 900
+      Statistic: Average
+      Threshold: 5.0
+      TreatMissingData: notBreaching
+  
+Mappings:
+  AmazonLinux2AMIMap:
+    us-east-1:
+      HVM64: ami-0742b4e673072066f
+      

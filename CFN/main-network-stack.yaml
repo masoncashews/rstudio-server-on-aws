@@ -1,0 +1,524 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Create the network stack for a RStudio Server (Open Source) EC2 Environment.
+
+Parameters:
+  ProjectTag:
+    Type: String
+    Description: Each created resourece that supports tagging will have this as a Project and this will be used as a prefix for all created resource.
+  ALBListenterCertArn:
+    Type: String
+    Description: ARN of the Certificate Manager certificate for load balancer SSL traffic [Only required if you'll have proxied instances].
+  S3ReadOnlyDataBucketARN:
+    Type: String
+    Description: ARN of the S3 bucket that holds read only data.
+  S3UserDataBucketARN:
+    Type: String
+    Description: ARN of the S3 bucket that holds user data, where the researcher can upload files [Only required if you'll have proxied instances].
+  ALBDefaultHTTPSRedirect:
+    Type: String
+    Description: Domain to redirect traffic that doesn't match any load balancer rules [Only required if you'll have proxied instances].
+    Default: aws.amazon.com
+  ALBListenterCertDomain:
+    Type: String
+    Description: Domain which is bound to the SSL certificate [Only required if you'll have proxied instances].
+  WillCreateProxiedInstances:
+    Type: String
+    Description: Will proxied instances be created in this environment? (Creates Loadbalancer, NAT Gateways, Private Subnets, Security Groups, and related items.)
+    AllowedValues: ["Yes","No"]
+    Default: "Yes"
+  SourceIPV4Subnet:
+    Type: String
+    Description: The Source IP Subnet for who will be connecting to the RStuidio Server instances (Ex 0.0.0.0/0 for the all sources), should be limited to a known subnet.
+  WillCreateDirectInstances:
+    Type: String
+    Description: Will direct access instances be created in this environment? (Creates Security Groups and related items.)
+    AllowedValues: ["Yes","No"]
+    Default: "Yes"
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Main Configuration"
+        Parameters:
+          - ProjectTag
+          - SourceIPV4Subnet
+      - Label:
+          default: "Direct Access RStudio Server Information"
+        Parameters:
+          - WillCreateDirectInstances
+      - Label:
+          default: "Proxied RStudio Server Instance Information"
+        Parameters:
+          - WillCreateProxiedInstances
+          - ALBListenterCertArn
+          - ALBListenterCertDomain
+          - ALBDefaultHTTPSRedirect
+      - Label:
+          default: "S3 Bucket"
+        Parameters:
+          - S3ReadOnlyDataBucketARN
+          - S3UserDataBucketARN
+    ParameterLabels:
+      ProjectTag:
+        default: "Project Tag"
+      ALBListenterCertArn:
+        default: "SSL Certificate ARN"
+      ALBDefaultHTTPSRedirect:
+        default: "Load balancer default redirect"
+      S3ReadOnlyDataBucketARN:
+        default: "S3 Read Only bucket"
+      S3UserDataBucketARN:
+        default: "S3 User Data bucket"
+      ALBListenterCertDomain:
+        default: "SSL Certificate Domain"
+      WillCreateProxiedInstances:
+        default: "Proxied instances?"
+      SourceIPV4Subnet:
+        default: "Source subnet block for instance user."
+      WillCreateDirectInstances:
+        default: "Directly accessed instances?"
+
+Outputs:
+  ProjectTag:
+    Value: !Ref ProjectTag
+    Description: Value for the Project Tag for created resources as well as a prefix for created resources.
+  VPC:
+    Value: !Ref VPC
+    Description: This is the VPC created by the stack.
+    Export:
+      Name: !Sub "${AWS::StackName}-vpc"
+  RStudioDirectSecurityGroup:
+    Condition: AreDirectInstances
+    Value: !Ref RStudioDirectSecurityGroup
+    Description: Security Group for direct access instances.
+    Export:
+      Name: !Sub "${AWS::StackName}-direct-instance-sg"
+  RStudioProxiedSecurityGroup:
+    Condition: AreProxiedInstances
+    Value: !Ref RStudioProxiedSecurityGroup
+    Description:  Security Group for proxied access instances.
+    Export:
+      Name: !Sub "${AWS::StackName}-proxied-instance-sg"
+  ResearcherInstanceProfile:
+    Value: !Ref ResearcherInstanceProfile
+    Description: Profile for Researcher Instance Profile.
+    Export:
+      Name: !Sub "${AWS::StackName}-researcher-instance-profile"
+  ResearchLoadBalancer:
+    Condition: AreProxiedInstances
+    Value: !Ref LoadBalancer
+    Description: Loadbalancer use to be a proxy for RStudio instances.
+  ResearchLoadBalancerHTTPSListener:
+    Condition: AreProxiedInstances
+    Value: !Ref HTTPSListener
+    Description: Loadbalancer https listener for researcher load balancer.
+    Export:
+      Name: !Sub "${AWS::StackName}-researcher-alb-https-listener"
+  S3UserDataBucketARN:
+    Value: !Ref S3UserDataBucketARN
+    Description: ARN for the User data bucket, where instances can read/write files.
+  S3ReadOnlyDataBucketARN:
+    Value: !Ref S3ReadOnlyDataBucketARN
+    Description: ARN for the Read Only Databucket, where instances can only read.
+  ALBListenterCertDomain:
+    Condition: AreProxiedInstances 
+    Value: !Ref ALBListenterCertDomain
+    Description: Domain for the HTTPS Listener.
+    Export:
+      Name: !Sub "${AWS::StackName}-alb-https-listener-domain"
+  CanCreateProxiedInstances:
+    Value: !Ref WillCreateProxiedInstances
+    Description: VPC can have proxied instances.
+  CanCreateDirectInstances:
+    Value: !Ref WillCreateDirectInstances
+    Description: VPC can have direct access instances.
+Conditions:
+  AreProxiedInstances: !Equals [!Ref WillCreateProxiedInstances, "Yes"]
+  AreDirectInstances: !Equals [!Ref WillCreateDirectInstances, "Yes"]
+
+Resources:
+#VPC
+  VPC:
+    Type: "AWS::EC2::VPC"
+    Properties:
+      CidrBlock: "10.1.0.0/16"
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+      - Key: Name
+        Value: !Join [ '-', [ !Ref ProjectTag, 'VPC']]
+      - Key: Project
+        Value: !Ref ProjectTag
+
+#InternetGateway
+  IG:
+    Type: "AWS::EC2::InternetGateway"
+    Properties:
+      Tags:
+      - Key: Name
+        Value: !Join [ '-', [ !Ref ProjectTag, "igw"]]
+      - Key: Project
+        Value: !Ref ProjectTag
+  
+  IGAttachment:
+    Type: "AWS::EC2::VPCGatewayAttachment"
+    Properties:
+      InternetGatewayId: !Ref IG
+      VpcId: !Ref VPC
+
+  IGVPCRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: "0.0.0.0/0"
+      RouteTableId: !Ref PublicSubnetRouteTable
+      GatewayId: !Ref IG
+
+#NAT Gateway
+  ResearchNATGateway:
+    Type: AWS::EC2::NatGateway
+    Condition: AreProxiedInstances
+    Properties:
+      AllocationId: !GetAtt ResearchNATGatewayEIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: !Join [ '-', [ !Ref ProjectTag, 'nat-gateway']]
+        - Key: Project
+          Value: !Ref ProjectTag
+
+  ResearchNATGatewayEIP:
+    Type: AWS::EC2::EIP
+    Condition: AreProxiedInstances
+    Properties:
+      Domain: !Ref VPC
+      Tags:
+        - Key:  Name
+          Value: !Sub "${ProjectTag}-nat-gateway-eip" 
+        - Key: Project
+          Value: !Ref ProjectTag
+
+  ResearchNATGatewayRoute:
+    Type: AWS::EC2::Route
+    Condition: AreProxiedInstances
+    Properties:
+        RouteTableId: !Ref PrivateSubnetRouteTable
+        DestinationCidrBlock: 0.0.0.0/0
+        NatGatewayId: !Ref ResearchNATGateway
+
+#Public Subnets
+  PublicSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: !Join [ '-', [ !Ref ProjectTag, 'public-subnet-rt']]
+      - Key: Project
+        Value: !Ref ProjectTag
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: "10.1.1.0/24"
+      AvailabilityZone: !Select 
+      - 0
+      - !GetAZs ''
+      MapPublicIpOnLaunch: true
+      Tags:
+      - Key: Name
+        Value: !Join [ '-', [ !Ref ProjectTag, 'public-subnet', '1']]
+      - Key: SubnetType
+        Value: public
+      - Key: Project
+        Value: !Ref ProjectTag
+      VpcId: !Ref VPC
+  
+  PublicSubnet1ToRouteTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicSubnetRouteTable
+      SubnetId: !Ref PublicSubnet1
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: "10.1.2.0/24"
+      AvailabilityZone: !Select 
+      - 1
+      - !GetAZs ''
+      MapPublicIpOnLaunch: true
+      Tags:
+      - Key: Name
+        Value: !Join [ '-', [ !Ref ProjectTag, 'public-subnet', '2']]
+      - Key: SubnetType
+        Value: public
+      - Key: Project
+        Value: !Ref ProjectTag
+      VpcId: !Ref VPC
+  
+  PublicSubnet2ToRouteTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicSubnetRouteTable
+      SubnetId: !Ref PublicSubnet2
+
+#PrivateSubnets
+  PrivateSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Condition: AreProxiedInstances
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: !Join [ '-', [ !Ref ProjectTag, 'private-subnet-rt']]
+      - Key: Project
+        Value: !Ref ProjectTag
+  
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Condition: AreProxiedInstances
+    Properties:
+      CidrBlock: "10.1.3.0/24"
+      AvailabilityZone: !Select 
+      - 0
+      - !GetAZs ''
+      MapPublicIpOnLaunch: false
+      Tags:
+      - Key: Name
+        Value: !Join [ '-', [ !Ref ProjectTag, 'private-subnet', '1']]
+      - Key: SubnetType
+        Value: private
+      - Key: Project
+        Value: !Ref ProjectTag
+      VpcId: !Ref VPC
+  
+  PrivateSubnet1ToRouteTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: AreProxiedInstances
+    Properties:
+      RouteTableId: !Ref PrivateSubnetRouteTable
+      SubnetId: !Ref PrivateSubnet1
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Condition: AreProxiedInstances
+    Properties:
+      CidrBlock: "10.1.4.0/24"
+      AvailabilityZone: !Select 
+      - 1
+      - !GetAZs ''
+      MapPublicIpOnLaunch: false
+      Tags:
+      - Key: Name
+        Value: !Join [ '-', [ !Ref ProjectTag, 'private-subnet', '2']]
+      - Key: SubnetType
+        Value: private
+      - Key: Project
+        Value: !Ref ProjectTag
+      VpcId: !Ref VPC
+  
+  PrivateSubnet2ToRouteTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: AreProxiedInstances
+    Properties:
+      RouteTableId: !Ref PrivateSubnetRouteTable
+      SubnetId: !Ref PrivateSubnet2
+
+#Security Groups
+  RStudioDirectSecurityGroup:
+      Type: AWS::EC2::SecurityGroup
+      Condition: AreDirectInstances
+      Properties:
+        GroupName: !Sub "rstudio-instance-direct-${AWS::StackName}-sg"
+        GroupDescription: RStudio Server Security Group
+        VpcId: !Ref VPC
+        SecurityGroupIngress:
+          - IpProtocol: tcp
+            ToPort: 8787
+            FromPort: 8787
+            CidrIp:  !Ref SourceIPV4Subnet
+          - IpProtocol: tcp
+            ToPort: 8080
+            FromPort: 8080
+            CidrIp:  !Ref SourceIPV4Subnet
+          - IpProtocol: tcp
+            ToPort: 80
+            FromPort: 80
+            CidrIp:  !Ref SourceIPV4Subnet
+        Tags:
+          - Key: Project 
+            Value: !Ref ProjectTag
+          - Key: Name
+            Value: !Sub "rstudio-instance-${AWS::StackName}-sg"
+    
+  RStudioProxiedSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: AreProxiedInstances
+    Properties:
+      GroupName: !Sub "rstudio-instance-proxied-${AWS::StackName}-sg"
+      GroupDescription: RStudio Server Proxied Security Group
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          ToPort: 80
+          FromPort: 80
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+      Tags:
+        - Key: Project 
+          Value: !Ref ProjectTag
+        - Key: Name
+          Value: !Sub "rstudio-instance-proxied-${AWS::StackName}-sg"
+
+  ALBSecurityGroup:
+      Type: AWS::EC2::SecurityGroup
+      Condition: AreProxiedInstances 
+      Properties:
+        GroupName: !Sub "alb-${AWS::StackName}-sg"
+        GroupDescription: Security Group for the ALB
+        VpcId: !Ref VPC
+        SecurityGroupIngress:
+          - IpProtocol: tcp
+            ToPort: 443
+            FromPort: 443
+            CidrIp: !Ref SourceIPV4Subnet
+          - IpProtocol: tcp
+            ToPort: 80
+            FromPort: 80
+            CidrIp: !Ref SourceIPV4Subnet
+        Tags:
+          - Key: Project 
+            Value: !Ref ProjectTag
+          - Key: Name
+            Value: !Sub "alb-${AWS::StackName}-sg"
+
+#IAM
+  ResearcherInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties: 
+      InstanceProfileName: !Join ["-", [!Ref ProjectTag, "researcher","instance","profile"]]
+      Path: /
+      Roles: 
+        - !Ref ResearcherInstanceRole
+
+  ResearcherInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Role for EC2 Researcher Instances
+      Tags:
+        - Key: Name
+          Value: !Join ["-", [!Ref ProjectTag, "researcher","instance","role"]]
+        - Key: Project
+          Value: !Ref ProjectTag
+      RoleName: !Join ["-", [!Ref ProjectTag, "researcher","instance","role"]]
+      ManagedPolicyArns:
+        - !Ref ResearcherInstancePolicy
+        - "arn:aws:iam::aws:policy/AmazonSSMPatchAssociation"
+        - "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+      AssumeRolePolicyDocument: 
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "ec2.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+
+  ResearcherInstancePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties: 
+      ManagedPolicyName: !Join ["-", [!Ref ProjectTag, "researcher","instance","policy"]]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - "s3:ListAllMyBuckets"
+            Resource:
+              - "*"
+          - Effect: Allow
+            Action:
+              - "s3:ListBucket"
+            Resource:
+              - !Sub "${S3ReadOnlyDataBucketARN}"
+              - !Sub "${S3UserDataBucketARN}"
+          - Effect: Allow
+            Action:
+              - "s3:GetObject"
+            Resource:
+              - !Sub "${S3ReadOnlyDataBucketARN}/*"
+              - !Sub "${S3UserDataBucketARN}/*"
+          - Effect: Allow
+            Action:
+              - "s3:PutObject"
+              - "s3:DeleteObject"
+            Resource:
+              - !Sub "${S3UserDataBucketARN}/*"
+          - Effect: Allow
+            Action:
+              - "ec2:Describe*"
+            Resource: "*"
+          - Effect: Allow
+            Action:
+              - "ec2:CreateTags"
+            Resource:
+              - !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:volume/*"
+
+#LoadBalancer - For Proxied
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Condition: AreProxiedInstances
+    Properties:
+      IpAddressType: ipv4
+      Scheme: internet-facing
+      Name: !Join [ '-', [ !Ref ProjectTag, 'alb']]
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      Type: application
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+  
+  HTTPSListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: AreProxiedInstances
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Certificates:
+        - CertificateArn: !Ref ALBListenterCertArn
+      DefaultActions:
+      - Order: 50000
+        Type: redirect
+        RedirectConfig:
+          Host: !Ref ALBDefaultHTTPSRedirect
+          Path: "/"
+          Port: "443"
+          Protocol: HTTPS
+          Query: ""
+          StatusCode: HTTP_302
+      Port: 443
+      Protocol: "HTTPS"
+      SslPolicy: ELBSecurityPolicy-2016-08
+
+  HTTPListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: AreProxiedInstances
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      DefaultActions:
+      - Order: 1
+        Type: redirect
+        RedirectConfig:
+          Host: "#{host}"
+          Path: /#{path}
+          Port: "443"
+          Protocol: HTTPS
+          Query: "#{query}"
+          StatusCode: HTTP_302
+      Port: 80
+      Protocol: HTTP
