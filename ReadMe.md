@@ -20,6 +20,7 @@ This solution uses a combination of the following services on [AWS](https://aws.
   * The EC2 Instance is assigned an IAM Policy/Role that allows it to be accessed by Systems Manager and has access to S3 Buckets (one that is read only, and one that is writeable by all EC2 instances in the created environment)
 * Application Load Balancer - This is used for proxying an instance.  It allows the EC2 instances to live in a private subnet but still be accessible.
   * This also allows traffic to RStudio Server to be encrypted with SSL up to the Load Balancer since RStudio Server Open Source doesn't have HTTPS capability.
+* NAT Gateway - This is used for proxied instances to connect to the internet since they do not ahve a public IP and are on a private subnet.
 * S3 - Simple Storage Service
   * Since the instances are meant to be non-permanent if possible.  All persistent data should be stored in S3.
     * One bucket for read only data, maybe source data, scripts, etc.
@@ -27,6 +28,16 @@ This solution uses a combination of the following services on [AWS](https://aws.
 * CloudWatch - AWS's monitoring and observability service
   * If configured to do so, the EC2 instances will have a CloudWatch alarm set to shut it down if it's idle for too long.  This is to safe costs since you pay for the compute time of running instances.  
   (*Note:  Even if the instance is off, you will still incur charges for storage and static ips if attached.*)
+
+***
+
+## **Things I'd like to add**
+
+* [ ] Allow more than one source subnet for users/researchers.
+* [ ] Use a custom resource to automatically select the next HTTPS listener rule versus it having to be entered.
+* [ ] Limit the subnets shown in the instance cloudformation templateto the ones created by the networking stack.
+* [ ] Make the CloudWatch alarm configurable for instance shutdown.
+* [ ] Combine the userdata boot strap script somehow so we're not maintaining two different code blocks.
 
 ***
 
@@ -44,7 +55,7 @@ Readme.md | This markdown.
 
 ## **CloudFormation templates detail**
 
-### **r-studio-network-stack.yaml**
+### **TEMPLATE:** r-studio-network-stack.yaml
 
 This template creates the VPC and network for the RStudio environment, it uses parameters to build out components for each instance type (Direct Access or Proxied.)
 
@@ -70,9 +81,30 @@ This template creates the VPC and network for the RStudio environment, it uses p
   * **Load balancer default redirect**: If someone tries to connect to the load balancer without a valid path, where should they be redirected?  (Should be an HTTPS capable domain.)
 * **S3 Buckets**
   * **S3 Read Only bucket**:  The ARN of the S3 bucket from which all of the instances can pull data, but not write.
-  * **S3 User Data bucket**:  The ARN of the S3 bucket frm which all of the instances can read and write data.  
-  
-### **r-studio-server-instance.yaml**
+  * **S3 User Data bucket**:  The ARN of the S3 bucket frm which all of the instances can read and write data.
+
+ #### **Outputs:** r-studio-network-stack.yaml
+
+* **ProjectTag**: The project tag that was set.
+* **VPC**: The VPC that was created.
+  * Exported as {stack name}-vpc
+* **RStudioDirectSecurityGroup**: If direct access RStudio Servers was selected, the security group that was created for the instances.
+  * Exported as {stack name}-direct-instance-sg
+* **RStudioProxiedSecurityGroup**: If proxied access RStudio Servers was selected, the security group that was created for the instances.
+  * Exported as {stack name}-proxied-instance-sg
+* **ResearcherInstanceProfile**: The IAM Profile with the appropriate role that was created for the instances.
+  * Exported as {stack name}-researcher-instance-profile
+* **ResearchLoadBalancer**: If proxied access RStudio Servers was selected, the load balancer that was created.
+* **ResearchLoadBalancerHTTPSListener**: If proxied access RStudio Servers was selected, the https listener that was created and bound to the loadbalancer.
+  * Exported as {stack name}-researcher-alb-https-listener
+* **S3UserDataBucketARN**: The S3 bucket ARN entered that the EC2 instances will have write access.
+* **S3ReadOnlyDataBucketARN**: The S3 bucket ARN entered that the EC2 instances will have only read access.
+* **ALBListenterCertDomain**: The domain name that will be used for proxied instances.  *The certificate and dns entry that point to the load balancer has to be done manually after this stack has run.*
+  * Exported as {stack name}-alb-https-listener-domain
+* **CanCreateProxiedInstances**: This stack was set to allow proxied instances.
+* **CanCreateDirectInstances**: This stack was allowed to set direct access instances.
+
+### **TEMPLATE:** r-studio-server-instance.yaml
 
   This template creates the RStudio Server instance.  It assumes you've already run the network stack and know the stack name.  It relies on exports from that stack to provision resources.
 
@@ -96,6 +128,7 @@ This template creates the VPC and network for the RStudio environment, it uses p
     * *Small*: t3.micro, (2vcpu, 1GB Memory), good for testing configurations without incurring much cost.
     * *Medium*: m5.4xlarge, (16vcpu, 64GB Memory), good for general workloads or development.
     * *Large*: m5.12xlarge, (48vcpu, 192GB Memory), this would be for larger batch jobs.
+  * **Key Pair**: This is an EC2 instance Key Pair you've already created.
   * **Disk Size**: The size in GB of the disk.  A gp3 disk with 16k IOPS will be provision to this size as the root volume.
   * **Shut down when idle?**: If set to yes a CloudWatch alarm will be configured to shut down the instances if its below 5% CPU utilization for 45 consecutive minutes.
 * **Application Configuration**
@@ -103,6 +136,16 @@ This template creates the VPC and network for the RStudio environment, it uses p
   * **Primary Owner**: Primary owner username.  Will create a linux user with this name.  Creates a tag on resources for posiible cost tracking and is used in some resource names.
   * **Primary Owner Intial Password**: Used to set the users initial linux password which they should change.  This is not echo'd to the screen.
   * **Project Tag**:  What project is this instance to be used for?  Creates a tag on resources for posiible cost tracking and is used in some resource names.
+  
+#### **Outputs:** r-studio-server-instance.yaml
+
+* **InstanceAccessMethod**: How the instance should be accessed (Proxied/Direct).
+* **RStudioURL**: The URL to access RStudio Server on this instance.
+* **VersionOfR**: The version of R was installed in the User Data/Bootstrap.
+* **ComputeSize**:  The size was chosen during the creation of this instance.
+* **ProjectTag**: The project tag that was set.
+* **PrimaryOwner**: The owner of this instance when it was created.
+* **InstanceCreated**: The ID of the instance created.
 
 ***
 
@@ -117,6 +160,8 @@ A basic diagram of how the communication flow will happen for researchers and us
 
 ### **Proxied Access Diagram**
 
-A basic diagram of how researchers  can access the RStudio servers.  Instead of directly accessing the RStudio it's through a base url and path which is handled by an application load balancer (ALB).  This allows for HTTPS communication up to the ALB.
+A basic diagram of how researchers  can access the RStudio servers.  Instead of directly accessing the RStudio it's through a base url and path which is handled by an application load balancer (ALB).  This allows for HTTPS communication up to the ALB through the use of an certificate issued by Certificate Manager.
+
+*Notes: Only showing one instance for simplicity of the diagram and the Bastion host is optional.  Session Manager is also a viable option.*
 
 ![Proxied Access](ASSETS/r-studio-direct-proxied.png)

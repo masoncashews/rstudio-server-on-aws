@@ -133,6 +133,8 @@ Outputs:
     Value: !Ref ComputeSize
   ProjectTag:
     Value: !Ref ProjectTag
+  PrimaryOwner:
+    Value: !Ref PrimaryOwner
   InstanceCreated:
     Value: !If [IsAccessedThroughProxy, !Ref ResearchInstanceProxied, !Ref ResearchInstanceDirect]
 
