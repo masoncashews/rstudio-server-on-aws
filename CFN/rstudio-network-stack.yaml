@@ -33,7 +33,7 @@ Parameters:
     Type: String
     Description: Will direct access instances be created in this environment? (Creates Security Groups and related items.)
     AllowedValues: ["Yes","No"]
-    Default: "Yes"
+    Default: "No"
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -48,14 +48,14 @@ Metadata:
         Parameters:
           - WillCreateDirectInstances
       - Label:
-          default: "Proxied RStudio Server Instance Information"
+          default: "Proxied RStudio Server Information"
         Parameters:
           - WillCreateProxiedInstances
           - ALBListenterCertArn
           - ALBListenterCertDomain
           - ALBDefaultHTTPSRedirect
       - Label:
-          default: "S3 Bucket"
+          default: "S3 Buckets"
         Parameters:
           - S3ReadOnlyDataBucketARN
           - S3UserDataBucketARN

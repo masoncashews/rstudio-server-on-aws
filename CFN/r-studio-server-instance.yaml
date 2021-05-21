@@ -1,0 +1,641 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: This is a stack to provision an RStudio Server instance on Amazon Linux 2 through either direct access or proxied through a Load Balancer.
+
+Parameters:
+  NetworkStack:
+    Type: String
+    Description: Name of the network stack that was used to create the VPC.  (Used to get exports)
+  InstanceAccessMethod:
+    Type: String
+    Description: How will this instance be accessed? Directly or through an Load Balancer Proxy? (Assumes appropriate options set in the network stack)
+    AllowedValues: [Direct, Proxied]
+    Default: Proxied
+  ProjectTag:
+    Type: String
+    Description: Each created resource that supports tagging will have this as a Project and this will be used as a prefix for all created resources.
+  Subnet:
+    Type: AWS::EC2::Subnet::Id
+    Description: The Subnet that the instances will live.  Direct Access should be a PUBLIC subnet, Proxied access should be PRIVATE subnet.
+  KeyPair:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: KeyPair used to access this instance.
+  ComputeSize:
+    Type: String
+    Description: Small= t3.micro (2 vcpu, 1GB Memory) | Medium= m5.4xlarge (16 vcpu, 64GB Memory) | Large= m5.12xlarge (48 vcpu, 192GB Memory)
+    AllowedValues: [Small, Medium, Large]
+  VolumeSize:
+    Type: Number
+    Description: The size in GB of the gp3 root volume for this instance. (1000GB = 1TB)
+    MinValue: 20
+    MaxValue: 16000
+    Default: 3000
+    ConstraintDescription: The maximum size for a gp3 volume is 16TB (16000GB) and should be no smaller than 20GB for OS installation
+  PrimaryOwner:
+    Type: String
+    Description:  Who is the primary user of this instance? (Sets a Tag and Linux credentials)
+  PrimaryOwnerPassword:
+    Type: String
+    Description:  Primary user password (set for Linux to be used in RStudio Server)
+    NoEcho: true
+  RVersion:
+    Type: String
+    Description: What version of R should be installed
+    AllowedValues: [R4, R3.4]
+    ConstraintDescription: The value must be in (R4, R3.4) case sensitive.  Installed by Amazon Linux Extras
+  ShutDownWhenIdle:
+    Type: String
+    Description: This will create a tag that will be used to trigger a shut down when the instance is idle.
+    AllowedValues: ["Yes","No"]
+    Default: "Yes"
+  LoadBalancerHTTPSListenerRolePriority:
+    Type: String
+    Description:  (Only for Proxied instances.) The priority of the rule that allows the load balancer to proxy traffic to this instance, between 2-49999 and cannot already exist. Will fail stack if duplicated.
+    AllowedPattern: "(^[0-9]+$|^$)"
+  RStudioPort:
+    Type: String
+    Description: (Only for Direct instances) Port for RStudio Server (default installation is 8787)
+    AllowedValues: ["80","8787","8080"]
+    Default: "80"
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "General Information"
+        Parameters:
+          - NetworkStack
+          - InstanceAccessMethod
+      - Label:
+          default: "Proxy/Load Balancer Information"
+        Parameters:
+          - LoadBalancerHTTPSListenerRolePriority
+      - Label:
+          default: "Direct Access Information"
+        Parameters:
+          - RStudioPort
+      - Label:
+          default: "Server Configuration"
+        Parameters:
+          - ComputeSize
+          - VolumeSize
+          - ShutDownWhenIdle
+          - KeyPair 
+          - Subnet 
+      - Label:
+          default: "Application Configuration"
+        Parameters:
+          - RVersion
+          - PrimaryOwner
+          - PrimaryOwnerPassword
+          - ProjectTag
+    ParameterLabels:
+      ProjectTag:
+        default: "Project Tag"
+      Subnet:
+        default: "Subnet of the instance"
+      KeyPair:
+        default: "Key Pair to access the instance"
+      ComputeSize:
+        default: "Instance size"
+      VolumeSize:
+        default: "Disk Size"
+      PrimaryOwner:
+        default: "Primary Owner"
+      PrimaryOwnerPassword:
+        default: "Primary Owner Initial Password"
+      RVersion:
+        default: "Version of R"
+      ShutDownWhenIdle:
+        default: "Shut down when idle?"
+      LoadBalancerHTTPSListenerRolePriority:
+        default: "Load balancer Rule Priority for this instance"
+      NetworkStack:
+        default: "Network Cloudformation Stack Name"
+      InstanceAccessMethod:
+        default: "Access Method"
+      RStudioPort:
+         default: "RStudio Server Port"
+
+Outputs:
+  InstanceAccessMethod: 
+    Value: !Ref InstanceAccessMethod
+  RStudioURL: 
+    Value:  !If 
+              - IsAccessedThroughProxy
+              - !Sub 
+                - "https://${domain}/${AWS::StackName}/"
+                - domain: !ImportValue 
+                            "Fn::Sub" : "${NetworkStack}-alb-https-listener-domain"
+              - !Sub "http://${ResearchInstanceDirect.PublicDnsName}:${RStudioPort}"
+  VersionOfR:
+    Value: !Ref RVersion
+  ComputeSize:
+    Value: !Ref ComputeSize
+  ProjectTag:
+    Value: !Ref ProjectTag
+  InstanceCreated:
+    Value: !If [IsAccessedThroughProxy, !Ref ResearchInstanceProxied, !Ref ResearchInstanceDirect]
+
+Conditions:
+  CreateSmallInstance: !Equals [!Ref ComputeSize, "Small"]
+  CreateMediumInstance: !Equals [!Ref ComputeSize, "Medium"]
+  #CreateLargeInstance: !Equals [!Ref ComputeSize, "Large"] #Not actually used in any comparison, but created just in case.
+  ShutdownInstanceWhenIdle: !Equals [!Ref ShutDownWhenIdle, "Yes" ]
+  IsAccessedDirectly: !Not [Condition: IsAccessedThroughProxy]
+  IsAccessedThroughProxy: !Equals [!Ref InstanceAccessMethod, "Proxied"]
+
+Resources:
+#Direct Access Instance
+  ResearchInstanceDirect:
+    Type: AWS::EC2::Instance
+    Condition: IsAccessedDirectly
+    DependsOn: ResearchInstanceDirectEIP
+    Properties:
+      KeyName: !Ref KeyPair
+      ImageId: !FindInMap [AmazonLinux2AMIMap, !Ref "AWS::Region", HVM64]
+      InstanceType: !If [CreateSmallInstance, t3.micro, !If [CreateMediumInstance, m5.4xlarge, m5.12xlarge]]
+      IamInstanceProfile: !ImportValue 
+                            "Fn::Sub" : "${NetworkStack}-researcher-instance-profile"
+      Monitoring: false
+      UserData: 
+        Fn::Base64: !Sub |
+          #!/bin/bash 
+          #Send outputs to a log and the console
+          exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+          
+          #Set Tags on the Instance Root Volumes
+          echo -e "\n*************\n*************\n*************\n Setting Volume Tags \n*************\n"
+          AWS_AVAIL_ZONE=$(curl http://169.254.169.254/latest/meta-data/placement/availability-zone)
+          AWS_REGION="`echo \"$AWS_AVAIL_ZONE\" | sed 's/[a-z]$//'`"
+          AWS_INSTANCE_ID=$(curl http://169.254.169.254/latest/meta-data/instance-id)
+          ROOT_VOLUME_IDS=$(aws ec2 describe-instances --region $AWS_REGION --instance-id $AWS_INSTANCE_ID --output text --query Reservations[0].Instances[0].BlockDeviceMappings[0].Ebs.VolumeId)
+          aws ec2 create-tags --resources $ROOT_VOLUME_IDS --region $AWS_REGION --tags Key=Project,Value=${ProjectTag} Key=Owner,Value=${PrimaryOwner}
+
+          #Start with updates 
+          echo -e "\n*************\n*************\n*************\n Pulling Updates \n*************\n"
+          cd /tmp
+          yum update -y
+
+          #Cloudwatch Agent
+          echo -e "\n*************\n*************\n*************\n Installing CloudWatch Agent \n*************\n"
+          yum install -y amazon-cloudwatch-agent
+
+          #Install mariadb-devel
+          echo -e "\n*************\n*************\n*************\n Installing mariadb-devel \n*************\n"
+          yum install -y mariadb-devel
+          
+          #Install curl-devel
+          echo -e "\n*************\n*************\n*************\n Installing curl-devel \n*************\n"
+          yum install -y curl-devel
+
+          #Install openssl-devel
+          echo -e "\n*************\n*************\n*************\n Installing libxml2-devel \n*************\n"
+          yum install -y libxml2-devel
+
+          #Install openssl-devel
+          echo -e "\n*************\n*************\n*************\n Installing openssl-devel \n*************\n"
+          yum install -y openssl-devel
+
+          #Install openssl-devel
+          echo -e "\n*************\n*************\n*************\n Installing git \n*************\n"
+          yum install -y git
+
+          #install R
+          echo -e "\n*************\n*************\n*************\n Installing R \n*************\n"
+          amazon-linux-extras install -y ${RVersion}
+
+          #install R Packages
+          echo -e "\n*************\n*************\n************* Installing R Packages - argparse \n*************\n"
+          R -e "install.packages('argparse', repos='http://cran.rstudio.com/')"
+
+          echo -e "\n*************\n*************\n************* Installing R Packages - DBI \n*************\n"
+          R -e "install.packages('DBI', repos='http://cran.rstudio.com/')"
+
+          echo -e "\n*************\n*************\n************* Installing R Packages - optparse \n*************\n"
+          R -e "install.packages('optparse', repos='http://cran.rstudio.com/')"
+
+          echo -e "\n*************\n*************\n************* Installing R Packages - RMySQL \n*************\n"
+          R -e "install.packages('RMySQL', repos='http://cran.rstudio.com/')"
+
+          echo -e "\n*************\n*************\n************* Installing R Packages - RSQLite \n*************\n"
+          R -e "install.packages('RSQLite', repos='http://cran.rstudio.com/')"
+
+          echo -e "\n*************\n*************\n************* Installing R Packages - xml2 \n*************\n"
+          R -e "install.packages('xml2', repos='http://cran.rstudio.com/')"
+          
+          echo -e "\n*************\n*************\n************* Installing R Packages - openssl \n*************\n"
+          R -e "install.packages('openssl', repos='http://cran.rstudio.com/')"
+
+          echo -e "\n*************\n*************\n************* Installing R Packages - httr \n*************\n"
+          R -e "install.packages('httr', repos='http://cran.rstudio.com/')"
+                    
+          echo -e "\n*************\n*************\n************* Installing R Packages - rmarkdown \n*************\n"
+          R -e "install.packages('rmarkdown', repos='http://cran.rstudio.com/')"
+          
+          echo -e "\n*************\n*************\n************* Installing R Packages - RCurl \n*************\n"
+          R -e "install.packages('RCurl', repos='http://cran.rstudio.com/')"
+          
+          # echo -e "\n*************\n*************\n*************\n Installing R Packages - shiny \n*************\n"
+          # R -e "install.packages('shiny', repos='http://cran.rstudio.com/')"
+          
+          echo -e "\n*************\n*************\n************* Installing R Packages - AWS.S3 \n*************\n"
+          R -e "install.packages('aws.s3', repos='http://cran.rstudio.com/')"
+
+          #install RStudio-Server Version:  1.4.1106| Released:  2021-03-02
+          echo -e "\n*************\n*************\n*************\n Installing RStudio Server \n*************\n"
+          wget https://download2.rstudio.org/server/centos7/x86_64/rstudio-server-rhel-1.4.1106-x86_64.rpm
+          yum install -y --nogpgcheck rstudio-server-rhel-1.4.1106-x86_64.rpm
+          rm rstudio-server-rhel-1.4.1106-x86_64.rpm
+
+          #add Primary user(s)
+          echo -e "\n*************\n*************\n*************\n Add Primary Owner user \n*************\n"
+          useradd ${PrimaryOwner}
+          echo ${PrimaryOwner}:${PrimaryOwnerPassword} | chpasswd
+
+          #set RStudio Server port
+          echo -e "\n*************\n*************\n*************\n RStudio Server port \n*************\n"
+          sh -c "echo 'www-port=80' > /etc/rstudio/rserver.conf"
+          rstudio-server restart
+
+          #Install SSM Agent
+          echo -e "\n*************\n*************\n*************\n Installing SSM Agent \n*************\n"
+          yum install -ty https://s3.${AWS::Region}.amazonaws.com/amazon-ssm-${AWS::Region}/latest/linux_amd64/amazon-ssm-agent.rpm
+          systemctl -q enable amazon-ssm-agent
+          systemctl -q start amazon-ssm-agent
+
+          echo -e "\n*************\n*************\n*************\n Bootstrapping complete \n*************\n"
+      BlockDeviceMappings:
+      - DeviceName: /dev/xvda
+        Ebs:
+          VolumeType: gp3
+          VolumeSize: !Ref VolumeSize
+          Iops: 16000
+          DeleteOnTermination: True
+          Encrypted: True
+      NetworkInterfaces:
+        - DeviceIndex: "0"
+          NetworkInterfaceId: !Ref ResearchInstanceDirectNetworkInterface
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+        - Key: Owner
+          Value: !Ref PrimaryOwner
+        - Key: Name
+          Value: !Sub "${PrimaryOwner}-${ProjectTag}-${AWS::StackName}"
+        - Key: ShutDownWhenIdle
+          Value: !Ref ShutDownWhenIdle
+  
+  ResearchInstanceDirectNetworkInterface:
+    Type: AWS::EC2::NetworkInterface
+    Condition: IsAccessedDirectly
+    Properties:
+      SubnetId: !Ref Subnet
+      Description: !Sub "Network interface for research instance created from stack ${AWS::StackName}"
+      GroupSet:
+      - !ImportValue 
+          "Fn::Sub" : "${NetworkStack}-direct-instance-sg"
+      SourceDestCheck: true
+      Tags:
+        - Key:  Name
+          Value: !Sub "${PrimaryOwner}-${ProjectTag}-${AWS::StackName}-network" 
+        - Key: Project
+          Value: !Ref ProjectTag
+        - Key: Owner
+          Value: !Ref PrimaryOwner
+
+  ResearchInstanceDirectEIP:
+    Type: AWS::EC2::EIP
+    Condition: IsAccessedDirectly
+    Properties:
+      Domain: !ImportValue 
+                "Fn::Sub" : "${NetworkStack}-vpc"
+      Tags:
+        - Key:  Name
+          Value: !Sub "${PrimaryOwner}-${ProjectTag}-${AWS::StackName}-eip" 
+        - Key: Project
+          Value: !Ref ProjectTag
+        - Key: Owner
+          Value: !Ref PrimaryOwner
+  
+  ResearchInstanceDirectEIPAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Condition: IsAccessedDirectly
+    Properties:
+      AllocationId: !GetAtt ResearchInstanceDirectEIP.AllocationId
+      NetworkInterfaceId: !Ref ResearchInstanceDirectNetworkInterface
+
+#Proxied Instance
+  ResearchInstanceProxied:
+    Type: AWS::EC2::Instance
+    Condition: IsAccessedThroughProxy
+    Properties:
+      KeyName: !Ref KeyPair
+      ImageId: !FindInMap [AmazonLinux2AMIMap, !Ref "AWS::Region", HVM64]
+      InstanceType: !If [CreateSmallInstance, t3.micro, !If [CreateMediumInstance, m5.4xlarge, m5.12xlarge]]
+      IamInstanceProfile: !ImportValue 
+                            "Fn::Sub" : "${NetworkStack}-researcher-instance-profile"
+      Monitoring: false
+      UserData: 
+        Fn::Base64: !Sub  
+          - |
+            #!/bin/bash 
+            #Send outputs to a log and the console
+            exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+
+            #Set Tags on the Instance Root Volumes
+            echo -e "\n*************\n*************\n*************\n Setting Volume Tags \n*************\n"
+            AWS_AVAIL_ZONE=$(curl http://169.254.169.254/latest/meta-data/placement/availability-zone)
+            AWS_REGION="`echo \"$AWS_AVAIL_ZONE\" | sed 's/[a-z]$//'`"
+            AWS_INSTANCE_ID=$(curl http://169.254.169.254/latest/meta-data/instance-id)
+            ROOT_VOLUME_IDS=$(aws ec2 describe-instances --region $AWS_REGION --instance-id $AWS_INSTANCE_ID --output text --query Reservations[0].Instances[0].BlockDeviceMappings[0].Ebs.VolumeId)
+            aws ec2 create-tags --resources $ROOT_VOLUME_IDS --region $AWS_REGION --tags Key=Project,Value=${ProjectTag} Key=Owner,Value=${PrimaryOwner}
+            
+            #Start with updates 
+            echo -e "\n*************\n*************\n*************\n Pulling Updates \n*************\n"
+            cd /tmp
+            yum update -y
+
+            #Cloudwatch Agent
+            echo -e "\n*************\n*************\n*************\n Installing CloudWatch Agent \n*************\n"
+            yum install -y amazon-cloudwatch-agent
+
+            #Install NGINXV1 to use as a proxy
+            echo -e "\n*************\n*************\n*************\n Install NGINX Proxy \n*************\n"
+            amazon-linux-extras install -y nginx1
+
+            #Install Setting base NGINX config
+            echo -e "\n*************\n*************\n*************\n Install NGINX Proxy Config\n*************\n"
+            cp /etc/nginx/nginx.conf /etc/nginx/nginx.config.bak
+            cd /etc/nginx
+            cat > /etc/nginx/nginx.conf <<EOL
+            # For more information on configuration, see:
+            #   * Official English Documentation: http://nginx.org/en/docs/
+            #   * Official Russian Documentation: http://nginx.org/ru/docs/
+
+            user nginx;
+            worker_processes auto;
+            error_log /var/log/nginx/error.log;
+            pid /run/nginx.pid;
+
+            # Load dynamic modules. See /usr/share/doc/nginx/README.dynamic.
+            include /usr/share/nginx/modules/*.conf;
+
+            events {
+                worker_connections 1024;
+            }
+
+            http {
+                log_format  main  '\$remote_addr - \$remote_user [\$time_local] "\$request" '
+                                  '\$status \$body_bytes_sent "\$http_referer" '
+                                  '"\$http_user_agent" "\$http_x_forwarded_for"';
+
+                access_log  /var/log/nginx/access.log  main;
+
+                sendfile            on;
+                tcp_nopush          on;
+                tcp_nodelay         on;
+                keepalive_timeout   65;
+                types_hash_max_size 4096;
+
+                include             /etc/nginx/mime.types;
+                default_type        application/octet-stream;
+
+                # Load modular configuration files from the /etc/nginx/conf.d directory.
+                # See http://nginx.org/en/docs/ngx_core_module.html#include
+                # for more information.
+                include /etc/nginx/conf.d/*.conf;
+
+                map \$http_upgrade \$connection_upgrade { default upgrade; '' close; }
+
+                server {
+                    listen       80;
+                    
+                    server_name {research-alb-domain};
+
+                    # Load configuration files for the default server block.
+                    include /etc/nginx/default.d/*.conf;
+                    rewrite ^/{rstudio-stack-path}\$ \$scheme://\$http_host/{rstudio-stack-path}/ permanent; 
+
+                    location /{rstudio-stack-path}/ {
+                        rewrite ^/{rstudio-stack-path}/(.*)\$ /\$1 break; 
+                        proxy_pass http://localhost:8787; 
+                        proxy_redirect http://localhost:8787/ \$scheme://\$http_host/{rstudio-stack-path}/;
+                        proxy_http_version 1.1;
+                        proxy_set_header Upgrade \$http_upgrade;
+                        proxy_set_header Connection \$connection_upgrade;
+                        proxy_set_header X-Real-IP \$remote_addr;
+                        proxy_read_timeout 20d;
+                        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+                        proxy_set_header X-Forwarded-Proto \$scheme;
+                    }
+                }  
+            }
+            EOL
+
+            #Setting base NGINX rewrite path and restarting NGINX
+            echo -e "\n*************\n*************\n*************\n Updating NGINX Proxy Config\n*************\n"
+            sed -i 's/{rstudio-stack-path}/${AWS::StackName}/g' /etc/nginx/nginx.conf
+            sed -i 's/{research-alb-domain}/${domainname}/g' /etc/nginx/nginx.conf
+            systemctl restart nginx
+
+            cd /tmp
+
+            #Install mariadb-devel
+            echo -e "\n*************\n*************\n*************\n Installing mariadb-devel \n*************\n"
+            yum install -y mariadb-devel
+            
+            #Install curl-devel
+            echo -e "\n*************\n*************\n*************\n Installing curl-devel \n*************\n"
+            yum install -y curl-devel
+
+            #Install openssl-devel
+            echo -e "\n*************\n*************\n*************\n Installing libxml2-devel \n*************\n"
+            yum install -y libxml2-devel
+
+            #Install openssl-devel
+            echo -e "\n*************\n*************\n*************\n Installing openssl-devel \n*************\n"
+            yum install -y openssl-devel
+
+            #Install openssl-devel
+            echo -e "\n*************\n*************\n*************\n Installing git \n*************\n"
+            yum install -y git
+
+            #install R
+            echo -e "\n*************\n*************\n*************\n Installing R \n*************\n"
+            amazon-linux-extras install -y ${RVersion}
+
+            #install R Packages
+            echo -e "\n*************\n*************\n************* Installing R Packages - argparse \n*************\n"
+            R -e "install.packages('argparse', repos='http://cran.rstudio.com/')"
+
+            echo -e "\n*************\n*************\n************* Installing R Packages - DBI \n*************\n"
+            R -e "install.packages('DBI', repos='http://cran.rstudio.com/')"
+
+            echo -e "\n*************\n*************\n************* Installing R Packages - optparse \n*************\n"
+            R -e "install.packages('optparse', repos='http://cran.rstudio.com/')"
+
+            echo -e "\n*************\n*************\n************* Installing R Packages - RMySQL \n*************\n"
+            R -e "install.packages('RMySQL', repos='http://cran.rstudio.com/')"
+
+            echo -e "\n*************\n*************\n************* Installing R Packages - RSQLite \n*************\n"
+            R -e "install.packages('RSQLite', repos='http://cran.rstudio.com/')"
+
+            echo -e "\n*************\n*************\n************* Installing R Packages - xml2 \n*************\n"
+            R -e "install.packages('xml2', repos='http://cran.rstudio.com/')"
+            
+            echo -e "\n*************\n*************\n************* Installing R Packages - openssl \n*************\n"
+            R -e "install.packages('openssl', repos='http://cran.rstudio.com/')"
+
+            echo -e "\n*************\n*************\n************* Installing R Packages - httr \n*************\n"
+            R -e "install.packages('httr', repos='http://cran.rstudio.com/')"
+                      
+            echo -e "\n*************\n*************\n************* Installing R Packages - rmarkdown \n*************\n"
+            R -e "install.packages('rmarkdown', repos='http://cran.rstudio.com/')"
+            
+            echo -e "\n*************\n*************\n************* Installing R Packages - RCurl \n*************\n"
+            R -e "install.packages('RCurl', repos='http://cran.rstudio.com/')"
+            
+            # echo -e "\n*************\n*************\n*************\n Installing R Packages - shiny \n*************\n"
+            # R -e "install.packages('shiny', repos='http://cran.rstudio.com/')"
+            
+            echo -e "\n*************\n*************\n************* Installing R Packages - AWS.S3 \n*************\n"
+            R -e "install.packages('aws.s3', repos='http://cran.rstudio.com/')"
+
+            #install RStudio-Server Version:  1.4.1106| Released:  2021-03-02
+            echo -e "\n*************\n*************\n*************\n Installing RStudio Server \n*************\n"
+            wget https://download2.rstudio.org/server/centos7/x86_64/rstudio-server-rhel-1.4.1106-x86_64.rpm
+            yum install -y --nogpgcheck rstudio-server-rhel-1.4.1106-x86_64.rpm
+            rm rstudio-server-rhel-1.4.1106-x86_64.rpm
+
+            #add Primary user(s)
+            echo -e "\n*************\n*************\n*************\n Add Primary Owner user \n*************\n"
+            useradd ${PrimaryOwner}
+            echo ${PrimaryOwner}:${PrimaryOwnerPassword} | chpasswd
+
+            #Install SSM Agent
+            echo -e "\n*************\n*************\n*************\n Installing SSM Agent \n*************\n"
+            yum install -ty https://s3.${AWS::Region}.amazonaws.com/amazon-ssm-${AWS::Region}/latest/linux_amd64/amazon-ssm-agent.rpm
+            systemctl -q enable amazon-ssm-agent
+            systemctl -q start amazon-ssm-agent
+
+            echo -e "\n*************\n*************\n*************\n Bootstrapping complete \n*************\n"
+          - domainname: !ImportValue 
+                          "Fn::Sub" : "${NetworkStack}-alb-https-listener-domain"
+      BlockDeviceMappings:
+      - DeviceName: /dev/xvda
+        Ebs:
+          VolumeType: gp3
+          VolumeSize: !Ref VolumeSize
+          Iops: 16000
+          DeleteOnTermination: True
+          Encrypted: True
+      NetworkInterfaces:
+        - DeviceIndex: "0"
+          NetworkInterfaceId: !Ref ResearchInstanceNetworkInterfaceProxied
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+        - Key: Owner
+          Value: !Ref PrimaryOwner
+        - Key: Name
+          Value: !Sub "${PrimaryOwner}-${ProjectTag}-${AWS::StackName}"
+        - Key: ShutDownWhenIdle
+          Value: !Ref ShutDownWhenIdle
+  
+  ResearchInstanceNetworkInterfaceProxied:
+    Type: AWS::EC2::NetworkInterface
+    Condition: IsAccessedThroughProxy
+    Properties:
+      SubnetId: !Ref Subnet
+      Description: !Sub "Network interface for research instance created from stack ${AWS::StackName}"
+      GroupSet:
+      - !ImportValue 
+          "Fn::Sub" : "${NetworkStack}-proxied-instance-sg"
+      SourceDestCheck: true
+      Tags:
+        - Key:  Name
+          Value: !Sub "${PrimaryOwner}-${ProjectTag}-${AWS::StackName}-network" 
+        - Key: Project
+          Value: !Ref ProjectTag
+        - Key: Owner
+          Value: !Ref PrimaryOwner
+
+  ResearchALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Condition: IsAccessedThroughProxy
+    Properties:
+      HealthCheckEnabled: True
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: !Sub "/${AWS::StackName}"
+      HealthCheckPort: "80"
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 10
+      HealthyThresholdCount: 2
+      Matcher: 
+        HttpCode: "200-499"
+      Name: !Sub "${AWS::StackName}-tg" 
+      Port: 80
+      Protocol: HTTP
+      Tags: 
+        - Key: Project
+          Value: !Ref ProjectTag
+        - Key: Owner
+          Value: !Ref PrimaryOwner
+        - Key:  Name
+          Value: !Sub "${AWS::StackName}-tg"
+      Targets: 
+        - Id: !Ref ResearchInstanceProxied
+          Port: 80
+      TargetType: instance
+      UnhealthyThresholdCount: 2
+      VpcId: !ImportValue 
+                "Fn::Sub" : "${NetworkStack}-vpc"
+    
+  ResearchALBListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Condition: IsAccessedThroughProxy
+    Properties: 
+      Actions: 
+        - Type: forward
+          ForwardConfig:
+            TargetGroups:
+              - TargetGroupArn: !Ref ResearchALBTargetGroup
+      Conditions: 
+        - Field: path-pattern
+          PathPatternConfig:
+            Values:
+              - !Sub "/${AWS::StackName}"
+              - !Sub "/${AWS::StackName}/"
+              - !Sub "/${AWS::StackName}/*"
+      ListenerArn: !ImportValue 
+                      "Fn::Sub" : "${NetworkStack}-researcher-alb-https-listener"
+      Priority: !Ref LoadBalancerHTTPSListenerRolePriority
+
+#Cloudwatch
+  ResearchInstanceCloudwatchAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: ShutdownInstanceWhenIdle
+    Properties:
+      ActionsEnabled: true
+      AlarmActions:
+        - !Sub "arn:aws:automate:${AWS::Region}:ec2:stop"
+      AlarmName: !Join ["-",["cwa-shutdown-idle-instance", !Sub "${AWS::StackName}"]]
+      AlarmDescription: !Sub "Alarm to detect idle instances created by stack ${AWS::StackName}"
+      ComparisonOperator: LessThanThreshold
+      DatapointsToAlarm: 3
+      Dimensions:
+        - Name: InstanceId
+          Value: !If [IsAccessedThroughProxy, !Ref ResearchInstanceProxied, !Ref ResearchInstanceDirect]
+      EvaluationPeriods: 3
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Period: 900
+      Statistic: Average
+      Threshold: 5.0
+      TreatMissingData: notBreaching
+
+Mappings:
+  AmazonLinux2AMIMap:
+    us-east-1:
+      HVM64: ami-0742b4e673072066f
+      
