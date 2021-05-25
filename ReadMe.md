@@ -35,7 +35,7 @@ This solution uses a combination of the following services on [AWS](https://aws.
 
 * [ ] Allow more than one source subnet for users/researchers.
 * [ ] Use a custom resource to automatically select the next HTTPS listener rule versus it having to be entered.
-* [ ] Limit the subnets shown in the instance cloudformation templateto the ones created by the networking stack.
+* [ ] Limit the subnets shown in the instance cloudformation template to the ones created by the networking stack.
 * [ ] Make the CloudWatch alarm configurable for instance shutdown.
 * [ ] Combine the userdata boot strap script somehow so we're not maintaining two different code blocks.
 
@@ -83,7 +83,7 @@ This template creates the VPC and network for the RStudio environment, it uses p
   * **S3 Read Only bucket**:  The ARN of the S3 bucket from which all of the instances can pull data, but not write.
   * **S3 User Data bucket**:  The ARN of the S3 bucket frm which all of the instances can read and write data.
 
- #### **Outputs:** r-studio-network-stack.yaml
+#### **Outputs:** r-studio-network-stack.yaml
 
 * **ProjectTag**: The project tag that was set.
 * **VPC**: The VPC that was created.
