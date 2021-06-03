@@ -26,9 +26,9 @@ Parameters:
     Description: Will proxied instances be created in this environment? (Creates Loadbalancer, NAT Gateways, Private Subnets, Security Groups, and related items.)
     AllowedValues: ["Yes","No"]
     Default: "Yes"
-  SourceIPV4Subnet:
-    Type: String
-    Description: The Source IP Subnet for who will be connecting to the RStuidio Server instances (Ex 0.0.0.0/0 for the all sources), should be limited to a known subnet.
+  SourceIPV4Subnets:
+    Type: CommaDelimitedList
+    Description: A Comma Delimited List of IPv4 that will be allowed to access these instances (Ex. 192.168.1.0/24,172.16.0.0/16)
   WillCreateDirectInstances:
     Type: String
     Description: Will direct access instances be created in this environment? (Creates Security Groups and related items.)
@@ -42,7 +42,7 @@ Metadata:
           default: "Main Configuration"
         Parameters:
           - ProjectTag
-          - SourceIPV4Subnet
+          - SourceIPV4Subnets
       - Label:
           default: "Direct Access RStudio Server Information"
         Parameters:
@@ -74,8 +74,8 @@ Metadata:
         default: "SSL Certificate Domain"
       WillCreateProxiedInstances:
         default: "Proxied instances?"
-      SourceIPV4Subnet:
-        default: "Source subnet block for instance user."
+      SourceIPV4Subnets:
+        default: "Subnets allowed to access RStudio."
       WillCreateDirectInstances:
         default: "Directly accessed instances?"
 
@@ -334,18 +334,14 @@ Resources:
         GroupDescription: RStudio Server Security Group
         VpcId: !Ref VPC
         SecurityGroupIngress:
-          - IpProtocol: tcp
-            ToPort: 8787
-            FromPort: 8787
-            CidrIp:  !Ref SourceIPV4Subnet
-          - IpProtocol: tcp
-            ToPort: 8080
-            FromPort: 8080
-            CidrIp:  !Ref SourceIPV4Subnet
-          - IpProtocol: tcp
-            ToPort: 80
-            FromPort: 80
-            CidrIp:  !Ref SourceIPV4Subnet
+          Fn::Transform:
+            Name: SGIngressTransformMacro
+            Parameters:
+              AllowPorts:
+                - 80
+                - 8080
+                - 8787
+              AllowCidrs: !Ref SourceIPV4Subnets
         Tags:
           - Key: Project 
             Value: !Ref ProjectTag
@@ -378,14 +374,13 @@ Resources:
         GroupDescription: Security Group for the ALB
         VpcId: !Ref VPC
         SecurityGroupIngress:
-          - IpProtocol: tcp
-            ToPort: 443
-            FromPort: 443
-            CidrIp: !Ref SourceIPV4Subnet
-          - IpProtocol: tcp
-            ToPort: 80
-            FromPort: 80
-            CidrIp: !Ref SourceIPV4Subnet
+          Fn::Transform:
+            Name: SGIngressTransformMacro
+            Parameters:
+              AllowPorts:
+                - 80
+                - 443
+              AllowCidrs: !Ref SourceIPV4Subnets
         Tags:
           - Key: Project 
             Value: !Ref ProjectTag

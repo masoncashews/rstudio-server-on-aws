@@ -2,6 +2,9 @@
 
 This project is an example on how to build an RStudio Server (Open Source) environment in [AWS](https://aws.amazon.com).  It allows for both proxied and direct access of the RStudio Server instances from a known subnet.  
 
+&nbsp;
+&nbsp;
+
 ***
 
 ## **Features**
@@ -29,15 +32,33 @@ This solution uses a combination of the following services on [AWS](https://aws.
   * If configured to do so, the EC2 instances will have a CloudWatch alarm set to shut it down if it's idle for too long.  This is to safe costs since you pay for the compute time of running instances.  
   (*Note:  Even if the instance is off, you will still incur charges for storage and static ips if attached.*)
 
+&nbsp;
+&nbsp;
+
+***
+
+## **Prerequisites**
+
+* The `SGIngressTransformMacro` for cloudformation already installed in your environment.
+  * Available [here](https://github.com/masoncashews/aws-cloudformation-macros).
+
+&nbsp;
+&nbsp;
+
 ***
 
 ## **Things I'd like to add**
 
-* [ ] Allow more than one source subnet for users/researchers.
+* [x] Allow more than one source subnet for users/researchers.
+  * Introduced a cloudformation macro called `SGIngressTransformMacro`
 * [ ] Use a custom resource to automatically select the next HTTPS listener rule versus it having to be entered.
 * [ ] Limit the subnets shown in the instance cloudformation template to the ones created by the networking stack.
-* [ ] Make the CloudWatch alarm configurable for instance shutdown.
-* [ ] Combine the userdata boot strap script somehow so we're not maintaining two different code blocks.
+* [ ] Make the CloudWatch alarm configurable via parameters for instance shutdown
+* [ ] Combine the user data/bootstrap script somehow so we're not maintaining two different code blocks.
+* [ ] Integrate cfinit to tell cloudformation how far along the user data/bootstrapping is for the EC2 instance.
+
+&nbsp;
+&nbsp;
 
 ***
 
@@ -45,11 +66,14 @@ This solution uses a combination of the following services on [AWS](https://aws.
 
 Asset | Description
 ----- | -----------
-/CFN/r-studio-network-stack.yaml | Cloudformation template that creates the networking components (VPC, Subnets, Route Tables, ALB, etc.)
-/CFN/r-studio-server-instance.yaml | Cloudformation template that creates the instance, either proxied or direct access depending on the parameters given.
+/CFN/rstudio-network-stack.yaml | Cloudformation template that creates the networking components (VPC, Subnets, Route Tables, ALB, etc.)
+/CFN/rstudio-server-instance.yaml | Cloudformation template that creates the instance, either proxied or direct access depending on the parameters given.
 /ASSETS/r-studio-direct-access.png | Diagram of basic flow for direct access instances.
 /ASSETS/r-studio-proxied-access.png | Diagram of basic flow for proxied access instances.
 Readme.md | This markdown.
+
+&nbsp;
+&nbsp;
 
 ***
 
@@ -147,6 +171,9 @@ This template creates the VPC and network for the RStudio environment, it uses p
 * **PrimaryOwner**: The owner of this instance when it was created.
 * **InstanceCreated**: The ID of the instance created.
 
+&nbsp;
+&nbsp;
+
 ***
 
 ## **Environment Diagrams**
@@ -155,6 +182,9 @@ This template creates the VPC and network for the RStudio environment, it uses p
 
 A basic diagram of how the communication flow will happen for researchers and users directly accessing the RStudio Server, this done via HTTP protocol on specified ports.
 ![Direct Access](ASSETS/r-studio-direct-access.png)
+
+&nbsp;
+&nbsp;
 
 ***
 
