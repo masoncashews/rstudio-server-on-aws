@@ -41,7 +41,8 @@ This solution uses a combination of the following services on [AWS](https://aws.
 
 * The `SGIngressTransformMacro` for cloudformation already installed in your environment.
   * Available [here](https://github.com/masoncashews/aws-cloudformation-macros).
-
+* The `ALBListenerRuleAutoPriority` for cloudformation already installed in your environment.
+  * Available [here](https://github.com/masoncashews/aws-cloudformation-macros).
 &nbsp;
 &nbsp;
 
@@ -51,7 +52,8 @@ This solution uses a combination of the following services on [AWS](https://aws.
 
 * [x] Allow more than one source subnet for users/researchers.
   * Introduced a cloudformation macro called `SGIngressTransformMacro`
-* [ ] Use a custom resource to automatically select the next HTTPS listener rule versus it having to be entered.
+* [x] Use a custom resource to automatically select the next HTTPS listener rule versus it having to be entered.
+  * Introducted `ALBListenerRuleAutoPriority` custom resource.
 * [ ] Limit the subnets shown in the instance cloudformation template to the ones created by the networking stack.
 * [ ] Make the CloudWatch alarm configurable via parameters for instance shutdown
 * [ ] Combine the user data/bootstrap script somehow so we're not maintaining two different code blocks.

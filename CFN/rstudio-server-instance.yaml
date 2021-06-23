@@ -47,10 +47,6 @@ Parameters:
     Description: This will create a tag that will be used to trigger a shut down when the instance is idle.
     AllowedValues: ["Yes","No"]
     Default: "Yes"
-  LoadBalancerHTTPSListenerRolePriority:
-    Type: String
-    Description:  (Only for Proxied instances.) The priority of the rule that allows the load balancer to proxy traffic to this instance, between 2-49999 and cannot already exist. Will fail stack if duplicated.
-    AllowedPattern: "(^[0-9]+$|^$)"
   RStudioPort:
     Type: String
     Description: (Only for Direct instances) Port for RStudio Server (default installation is 8787)
@@ -65,10 +61,6 @@ Metadata:
         Parameters:
           - NetworkStack
           - InstanceAccessMethod
-      - Label:
-          default: "Proxy/Load Balancer Information"
-        Parameters:
-          - LoadBalancerHTTPSListenerRolePriority
       - Label:
           default: "Direct Access Information"
         Parameters:
@@ -107,8 +99,6 @@ Metadata:
         default: "Version of R"
       ShutDownWhenIdle:
         default: "Shut down when idle?"
-      LoadBalancerHTTPSListenerRolePriority:
-        default: "Load balancer Rule Priority for this instance"
       NetworkStack:
         default: "Network Cloudformation Stack Name"
       InstanceAccessMethod:
@@ -562,6 +552,13 @@ Resources:
         - Key: Owner
           Value: !Ref PrimaryOwner
 
+  ResearchALBListenerRulePriorityResource:
+    Type: Custom::ALBListenerRuleAutoPriorityResource
+    Properties:
+      ServiceToken:
+        Fn::ImportValue: customALBListenerRuleAutoPriority
+      ListenerArn: !ImportValue 
+                      "Fn::Sub" : "${NetworkStack}-researcher-alb-https-listener"
   ResearchALBTargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Condition: IsAccessedThroughProxy
@@ -611,7 +608,7 @@ Resources:
               - !Sub "/${AWS::StackName}/*"
       ListenerArn: !ImportValue 
                       "Fn::Sub" : "${NetworkStack}-researcher-alb-https-listener"
-      Priority: !Ref LoadBalancerHTTPSListenerRolePriority
+      Priority: !GetAtt ResearchALBListenerRulePriorityResource.Priority
 
 #Cloudwatch
   ResearchInstanceCloudwatchAlarm:
